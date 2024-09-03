@@ -127,6 +127,8 @@ class MoEAuxLossAutoScaler(torch.autograd.Function):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: The gradient of the output, scaled auxiliary loss gradient.
         """
+        # XXX(yangjianbang): 实际上aux_loss不需要最终加到主loss中, 直接在此处反向时生成梯度即可
+        # https://arxiv.org/pdf/2006.16668
         (aux_loss,) = ctx.saved_tensors
         aux_loss_backward_scale = MoEAuxLossAutoScaler.main_loss_backward_scale
         scaled_aux_loss_grad = torch.ones_like(aux_loss) * aux_loss_backward_scale
