@@ -127,6 +127,8 @@ class MoEAuxLossAutoScaler(torch.autograd.Function):
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: The gradient of the output, scaled auxiliary loss gradient.
         """
+        # XXX(yangjianbang): 实际上aux_loss不需要最终加到主loss中, 直接在此处反向时生成梯度即可
+        # https://arxiv.org/pdf/2006.16668
         (aux_loss,) = ctx.saved_tensors
         aux_loss_backward_scale = MoEAuxLossAutoScaler.main_loss_backward_scale
         scaled_aux_loss_grad = torch.ones_like(aux_loss) * aux_loss_backward_scale
@@ -166,6 +168,18 @@ def permute(tokens, indices, num_out_tokens: int = None, padded_mode: bool = Fal
     sorted_indices = torch.argsort(flatten_indices, stable=True)
     if num_out_tokens is not None:
         sorted_indices = sorted_indices[:num_out_tokens]
+    # 对于第一次 permute 而言: 将本地的 token 按照全局 expert id 的顺序进行排列
+    #  - index_select 是对 token 的 hidden_states 进行排列
+    #  - `// topk`是表示同一个 topk 的 token 选取的来源应该一致, 就是拷贝相同的 hidden_states
+    #  - 例如, indices = [[0, 1], [1, 2], [0, 2]], num_tokens = 3 and topk = 2
+    #         flatten_indices = [0, 1, 1, 2, 0, 2]
+    #         sorted_indices = [0, 4, 1, 2, 3, 5]
+    #         sorted_indices // topk  = [0, 4, 1, 2, 3, 5] // 2 = [0, 2, 0, 1, 1, 2]
+
+    # 对于第二次 permute 而言: 目标是将不同 ep rank 发来的 token (已经被各自的 ep rank 进行了 local permute) 按照 local expert 的顺序进行排列
+    #  - indices 的维度是1维的, 传入的indices是 global_input_tokens_local_experts_indices
+    #  - 例如, 传入的 indices = [0, 0, 1, 1, 1, 2, 2, 0, 1, 1, 2], 开头的2个0代表 local expert 0负责来自ep rank=0的2个 token
+    #               sorted_indices = [0, 1, 7, 2, 3, 4, 8, 9, 5, 6, 10], 代表每个 permuted_tokens 在输入 tokens 中的位置
     permuted_tokens = tokens.index_select(0, sorted_indices // topk)
     return permuted_tokens, sorted_indices
 

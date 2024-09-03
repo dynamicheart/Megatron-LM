@@ -374,6 +374,20 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.cuda_sync_point = "before_finish"
 
         if ep_size > 1:
+            # 例如, ep_size =2, num_local_experts = 4, num_experts = 8
+            # num_local_tokens_per_expert: [num_experts] local token 划分给所有的expert
+            # num_global_tokens_per_expert: [ep_size, num_experts] 所有 ep rank 对应的 local token 的划分情况
+            # num_global_tokens_per_local_expert: [ep_size, num_local_experts] 所有 ep rank 对应的当前 ep rank local expert 的划分情况
+            # num_tokens_per_local_expert: [num_local_experts] 每个 local expert 拥有的 global token 数量
+            # expert_ids_per_ep_rank: [num_experts] 在上例中, 等于[0, 1, 2, 3, 0, 1, 2, 3]
+            # global_input_tokens_local_experts_indices: [num_global_tokens_in_current_ep_rank], 
+            #                                            在上例子中, 假设 num_global_tokens_per_local_expert = [[1, 2, 1, 2], [2, 1, 2, 1]]
+            #                                            global_input_tokens_local_experts_indices = [0, 1, 1, 2, 3, 3, 0, 0, 1, 2, 2, 3]
+            #
+            #
+            # input_splits: [ep_size, 1] input tokens 分别应该发多少到各个 ep rank
+            # output_splits: [ep_size, 1] 各个 ep rank 预期接收多少 token
+
             # ===================================================
             # Calculate input_splits, output_splits for alltoall-v.
             # ===================================================
@@ -383,6 +397,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 .to(torch.device("cpu"), non_blocking=True)
                 .numpy()
             )
+            # _gather_along_first_dim_expert_parallel 简单地将所有 ep rank 的数据聚合
             num_global_tokens_per_expert = _gather_along_first_dim_expert_parallel(
                 num_local_tokens_per_expert
             ).reshape(ep_size, self.num_experts)
@@ -446,6 +461,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         # Perform tensor parallel AlltoAll communication
         # hidden_states: [S*B/TP, H] -> [S*B, H/TP]
+        # XXX(yangjianbang): 此步骤的目的是收集所有的 token, 将切分的维度从 S*B 变为 H
+        # 使得每一个 tp rank 都能获取全部的 token, 进行 all_to_all
         if parallel_state.get_tensor_model_parallel_world_size() > 1:
             hidden_states = tensor_parallel.all_to_all_sp2hp(hidden_states)
 
@@ -539,6 +556,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
+        # all_to_all的逆操作是调换 input_splits 和 output_splits
         permutated_local_input_tokens = tensor_parallel.all_to_all(
             parallel_state.get_expert_model_parallel_group(),
             hidden_states,
